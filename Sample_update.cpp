@@ -10,6 +10,7 @@
 // #include "MoveSenseSDK/MoveSenseCamera/CameraRegister.h"
 #include "CameraRegister.h"
 #include "fx3_update.h"
+#include "errno.h"
 
 using namespace movesense;
 
@@ -141,6 +142,10 @@ void Updata_FPGA(){
 	}
 	int r;
 	r = libusb_claim_interface(handle, 0);
+	if(r != 0){
+		cout << "libusb claim interface error"<<endl;
+		exit(-1);
+	}
 
 	int size1, size2;
 	int r1, r2;
@@ -185,6 +190,11 @@ void Updata_FPGA(){
 	printf("waiting erasering(about 30s)...\n");
 	int r_count;
 	r_count = libusb_control_transfer(handle,ReqType,ReqCode,Value,Index,(unsigned char*)buf,len,timeout);
+	if(r_count != len){
+		cout<< "control eraser transfer error"<<endl;
+		exit(-1);
+	}
+	r_count = 0;
 	usleep(file_bytes_len*10);	//2M数据一次擦除大概需要20s+(经验?)；先空等待file_bytes/110毫秒，然后就是循环去获取数值了
 
 	/***************校验擦除是否完成******************/
@@ -200,11 +210,18 @@ void Updata_FPGA(){
 	len = 4;
 	timeout = 2000;	//millseconds
 	r_count=libusb_control_transfer(handle,ReqType,ReqCode,Value,Index,(unsigned char*)buf,len,timeout);
+	if(r_count != len){
+		cout<<"conrol eraser check transfer error"<<endl;
+	}
+	r_count = 0;
 	printf("first eraser check return value: %d\n",r_count);
 	while(buf[0] != 0x11){
 		printf("buf[0] %x\n",buf[0]);	//Debug
 		sleep(2);
-		libusb_control_transfer(handle,ReqType,ReqCode,Value,Index,(unsigned char*)buf,len,timeout);
+		r_count=libusb_control_transfer(handle,ReqType,ReqCode,Value,Index,(unsigned char*)buf,len,timeout);
+		if(r_count != len){
+			cout<<"conrol eraser check transfer error"<<endl;
+		}
 	}
 
 	cout <<" check success"<<endl;
@@ -221,21 +238,50 @@ void Updata_FPGA(){
 	buf[2] = (char)((file_bytes_len & 0x00FF0000) >> 16);
 	buf[3] = (char)((file_bytes_len & 0xFF000000) >> 24);
 	buf[4] = 0x22; //表示正常包
-	libusb_control_transfer(handle,ReqType,ReqCode,Value,Index,(unsigned char*)buf,len,timeout);
+	r_count =libusb_control_transfer(handle,ReqType,ReqCode,Value,Index,(unsigned char*)buf,len,timeout);
+	if(r_count != len){
+		cout<<"conrol toupdate transfer error"<<endl;
+	}
 	// start transmit
 	
 	/**************下载操作及提示*************/
+	cout << "last error before bulk"<<endl;
+	perror(strerror(errno));
 	size1 = 0;
 	int size_count = 0;
+	int error_count  = 0;
 	{
 		int i;
+		int sr1 = 0;
+		int prcount = 0;
 		for(i=0;i<file_bytes_len/4096;i++){
 			r1 = libusb_bulk_transfer(handle, endpoint_out,(unsigned char*) file_bytes_cont+4096*i,4096, &size1, 1000);
+			if(r1 != 0){
+				if(r1 == LIBUSB_ERROR_TIMEOUT)	cout<<"1 LIBUSB_ERROR_TIMEOUT, bulk transfer timeout"<<endl;
+				else if(r1 == LIBUSB_ERROR_PIPE ) cout<<"1 LIBUSB_ERROR_PIPE, endpoint halted"<<endl;
+				else if(r1 == LIBUSB_ERROR_OVERFLOW) cout<<"1 LIBUSB_ERROR_OVERFLOW"<<endl;
+				else if(r1 == LIBUSB_ERROR_NO_DEVICE) cout<<"1 LIBUSB_ERROR_NO_DEVICE, device has been disconnected"<<endl;
+				else if(r1 == LIBUSB_ERROR_BUSY) cout<<"1 LIBUSB_ERROR_BUSY, if called from event handing context"<<endl;
+				else 
+					cout<<"1 unknowed error in bulk transfer"<<endl;
+				
+			}
 			size_count = size_count + size1;
-			cout<<"downloaded size : " << size_count<<endl;
+			if(size1 != 4096){
+				error_count ++;
+			}
+			if(size_count)
+			if(++prcount == 50){
+				cout<<"downloaded size : " << size_count<<endl;
+				prcount = 0;
+			}
 		}
+		if(error_count != 0)
+			cout << "error count " <<error_count<<endl;
 		libusb_bulk_transfer(handle, endpoint_out,(unsigned char*) file_bytes_cont+4096*i,file_bytes_len%4096, &size1, 1000);
 	}
+	cout << "last error after bulk"<<endl;
+	perror(strerror(errno));
 	//onetime only 4096;
 	if(r == 0){
 		cout<<"downloaded size : " << size_count+file_bytes_len%4096<<endl;
@@ -334,6 +380,9 @@ bool Fresh_Device()
 	static int assume_fx3_flag = 0;
 	static uint assume_fx3_idProduct = 0;
 	int r = libusb_init(&ctx);
+	if(r < 0){
+		exit(-1);
+	}
 	int cnt = 0;
 	cnt = libusb_get_device_list(ctx, &devs); 	
 	if(cnt < 0) {
